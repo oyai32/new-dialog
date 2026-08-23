@@ -11,6 +11,6 @@ const install = (app: App) => {
 
 export default install
 export { NewDialog, NewDrawer }
-export { openDialog, openDrawer } from './open-dialog'
+export { openDialog, openDrawer, useDialog } from './open-dialog'
 export { DialogCancelledError } from './types'
-export type { DialogAction, DialogKind, OpenDialogOptions } from './types'
+export type { DialogAction, DialogKind } from './types'

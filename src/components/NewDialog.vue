@@ -2,14 +2,14 @@
   <component
     :is="overlayComponent"
     v-bind="$attrs"
-    :model-value="modelValue"
+    :model-value="visible"
     :title="title"
     :before-close="handleBeforeClose"
-    @update:model-value="emit('update:modelValue', $event)"
+    @update:model-value="visible = $event"
     @open="emit('open')"
     @opened="emit('opened')"
     @close="emit('close')"
-    @closed="emit('closed')"
+    @closed="handleClosed"
   >
     <!-- 弹窗主体内容。 -->
     <slot />
@@ -34,11 +34,9 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ElButton, ElDialog, ElDrawer } from 'element-plus'
-import type { DialogKind, DialogAction } from '../types'
+import { type DialogKind, type DialogAction } from '../types'
 
 export interface NewDialogProps {
-  /** 控制弹窗显示状态。 */
-  modelValue: boolean
   /** 弹窗类型。 */
   kind?: DialogKind
   /** 标题；也可用 header 插槽完全替换。 */
@@ -66,14 +64,10 @@ const props = withDefaults(defineProps<NewDialogProps>(), {
 })
 
 const emit = defineEmits<{
-  /** 更新显示状态。 */
-  'update:modelValue': [value: boolean]
   /** 确认操作成功后的返回值。 */
   confirm: [result: unknown]
   /** 取消操作成功执行。 */
   cancel: [result: unknown]
-  /** 确认或取消操作抛出的异常。 */
-  'action-error': [error: unknown]
   open: []
   opened: []
   close: []
@@ -82,7 +76,38 @@ const emit = defineEmits<{
 
 const confirmLoading = ref(false)
 const cancelLoading = ref(false)
+const visible = ref(false)
 const overlayComponent = computed(() => props.kind === 'drawer' ? ElDrawer : ElDialog)
+
+let pendingOpen: {
+  resolve: (value: unknown) => void
+} | null = null
+
+function settleOpen(result: unknown) {
+  if (!pendingOpen) return
+  const { resolve } = pendingOpen
+  pendingOpen = null
+  resolve(result)
+}
+
+/** 打开弹窗；返回的 Promise 在确认时返回结果，用户取消时返回 undefined。 */
+function open(): Promise<unknown> {
+  if (pendingOpen) settleOpen(undefined)
+  visible.value = true
+  return new Promise(resolve => {
+    pendingOpen = { resolve }
+  })
+}
+
+function close() {
+  settleOpen(undefined)
+  visible.value = false
+}
+
+function handleClosed() {
+  if (pendingOpen) settleOpen(undefined)
+  emit('closed')
+}
 
 async function runAction(action?: DialogAction) {
   return action ? await action() : undefined
@@ -95,9 +120,8 @@ async function requestConfirm() {
     const result = await runAction(props.confirmAction)
     if (result === false) return
     emit('confirm', result)
-    emit('update:modelValue', false)
-  } catch (error) {
-    emit('action-error', error)
+    settleOpen(result)
+    visible.value = false
   } finally {
     confirmLoading.value = false
   }
@@ -110,11 +134,9 @@ async function requestCancel() {
     const result = await runAction(props.cancelAction)
     if (result === false) return false
     emit('cancel', result)
-    emit('update:modelValue', false)
+    settleOpen(undefined)
+    visible.value = false
     return true
-  } catch (error) {
-    emit('action-error', error)
-    return false
   } finally {
     cancelLoading.value = false
   }
@@ -124,5 +146,5 @@ async function handleBeforeClose(done: () => void) {
   if (await requestCancel()) done()
 }
 
-defineExpose({ requestConfirm, requestCancel })
+defineExpose({ open, close, requestConfirm, requestCancel })
 </script>

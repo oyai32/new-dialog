@@ -1,22 +1,21 @@
-import { createVNode, ref, render, type ComponentPublicInstance, type VNode } from 'vue'
-import NewDialog from './components/NewDialog.vue'
-import { DialogCancelledError, type OpenDialogOptions } from './types'
+import { createVNode, getCurrentInstance, render, type AppContext, type Component, type VNode } from 'vue'
 
 /**
- * 命令式打开一个业务组件，并以 Promise 返回确认结果。
- * 关闭动画结束后才卸载临时根节点，因此不会截断 Element Plus 的 transition。
+ * 命令式挂载一个内部使用 NewDialog 的业务组件。
+ *
+ * 业务组件需暴露 `open(params)` 方法，并转发 NewDialog 的 `confirm`、`cancel` 与 `closed` 事件。
  */
-export function openDialog<TProps extends Record<string, unknown> = Record<string, unknown>, TResult = unknown>(
-  options: OpenDialogOptions<TProps, TResult>,
-): Promise<TResult> {
+export function openDialog<TParams = undefined, TResult = unknown>(
+  component: Component,
+  params?: TParams,
+  appContext?: AppContext,
+): Promise<TResult | undefined> {
   if (typeof document === 'undefined') {
     return Promise.reject(new Error('openDialog can only be used in a browser environment'))
   }
 
   const container = document.createElement('div')
   document.body.appendChild(container)
-  const visible = ref(true)
-  const contentRef = ref<ComponentPublicInstance | null>(null)
   let settled = false
   let vnode: VNode | null = null
 
@@ -26,49 +25,52 @@ export function openDialog<TProps extends Record<string, unknown> = Record<strin
     vnode = null
   }
 
-  return new Promise<TResult>((resolve, reject) => {
-    const resolveOnce = (value: TResult) => {
+  return new Promise<TResult | undefined>((resolve, reject) => {
+    const resolveOnce = (value: TResult | undefined) => {
       if (settled) return
       settled = true
       resolve(value)
     }
-    const rejectOnce = (reason: unknown = new DialogCancelledError()) => {
+    const rejectOnce = (error: unknown) => {
       if (settled) return
       settled = true
-      reject(reason)
+      reject(error)
     }
 
-    const renderOverlay = () => {
-      vnode = createVNode(NewDialog, {
-        ...options.overlayProps,
-        modelValue: visible.value,
-        kind: options.kind,
-        title: options.title,
-        confirmText: options.confirmText,
-        cancelText: options.cancelText,
-        confirmAction: () => options.onConfirm?.(contentRef.value),
-        cancelAction: options.onCancel,
-        'onUpdate:modelValue': (value: boolean) => {
-          visible.value = value
-          renderOverlay()
-        },
-        onConfirm: (result: TResult) => resolveOnce(result),
-        onCancel: () => rejectOnce(),
-        onClosed: () => {
-          rejectOnce()
-          cleanup()
-        },
-      }, {
-        default: () => createVNode(options.component, { ...options.props, ref: contentRef }),
-      })
-      vnode.appContext = options.appContext ?? null
-      render(vnode, container)
-    }
+    vnode = createVNode(component, {
+      onConfirm: (result: TResult) => resolveOnce(result),
+      onCancel: () => resolveOnce(undefined),
+      onClosed: () => {
+        resolveOnce(undefined)
+        cleanup()
+      },
+    })
+    vnode.appContext = appContext ?? null
+    render(vnode, container)
 
-    renderOverlay()
+    const exposed = vnode.component?.exposed as { open?: (params?: TParams) => Promise<unknown> } | undefined
+    if (!exposed?.open) {
+      cleanup()
+      rejectOnce(new Error('The dialog component must expose an open(params) method'))
+      return
+    }
+    void exposed.open(params).catch(rejectOnce)
   })
 }
 
-export const openDrawer = <TProps extends Record<string, unknown> = Record<string, unknown>, TResult = unknown>(
-  options: Omit<OpenDialogOptions<TProps, TResult>, 'kind'>,
-) => openDialog<TProps, TResult>({ ...options, kind: 'drawer' })
+/** 与 openDialog 相同；Drawer 类型由业务组件内部的 NewDrawer 决定。 */
+export const openDrawer = openDialog
+
+/**
+ * 在组件 setup 中调用，返回自动继承当前应用上下文的命令式 API。
+ */
+export function useDialog() {
+  const appContext = getCurrentInstance()?.appContext
+
+  return {
+    openDialog: <TParams = undefined, TResult = unknown>(component: Component, params?: TParams) =>
+      openDialog<TParams, TResult>(component, params, appContext),
+    openDrawer: <TParams = undefined, TResult = unknown>(component: Component, params?: TParams) =>
+      openDrawer<TParams, TResult>(component, params, appContext),
+  }
+}

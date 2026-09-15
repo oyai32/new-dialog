@@ -8,10 +8,10 @@
       </div>
       <div v-else class="loading">加载中...</div>
     </div>
-    
+
     <div class="demo-toolbar">
-       <el-tooltip :content="copySuccess ? '已复制' : '复制代码'" placement="top">
-        <el-button link @click="copyCode" class="toolbar-btn icon-btn" :class="{ 'copied': copySuccess }">
+      <el-tooltip :content="copySuccess ? '已复制' : '复制代码'" placement="top">
+        <el-button link @click="copyCode" class="toolbar-btn icon-btn" :class="{ copied: copySuccess }">
           <el-icon>
             <component :is="copySuccess ? Check : DocumentCopy" />
           </el-icon>
@@ -20,19 +20,21 @@
 
       <el-tooltip :content="showCode ? '隐藏代码' : '显示代码'" placement="top">
         <el-button link @click="toggleCode" class="toolbar-btn icon-btn">
-          <el-icon> <component :is="showCode ? ArrowUp : ArrowDown" /></el-icon>
+          <el-icon><component :is="showCode ? ArrowUp : ArrowDown" /></el-icon>
         </el-button>
       </el-tooltip>
-      
-      <!-- <el-tooltip content="在新标签页打开" placement="top">
-        <button @click="openInNewTab" class="toolbar-btn icon-btn">
-          <el-icon><View /></el-icon>
-        </button>
-      </el-tooltip> -->
     </div>
-    
-    <div v-if="showCode && sourceCode" class="demo-code-wrapper">
-      <div class="demo-code" v-html="highlightedCode"></div>
+
+    <div v-if="showCode && sourceFiles.length" class="demo-code-wrapper">
+      <el-tabs v-if="sourceFiles.length > 1" v-model="activeFile" class="demo-code-tabs">
+        <el-tab-pane
+          v-for="file in sourceFiles"
+          :key="file.path"
+          :label="file.label"
+          :name="file.path"
+        />
+      </el-tabs>
+      <div class="demo-code" v-html="activeHighlightedCode" />
     </div>
   </div>
 </template>
@@ -47,193 +49,227 @@ interface Props {
   src: string
   /** 是否默认展开代码 */
   defaultExpand?: boolean
+  /** 额外展示的源码文件，逗号分隔；不传则自动解析 src 中的本地 .vue 引用 */
+  files?: string
+}
+
+interface SourceFile {
+  path: string
+  label: string
+  content: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  defaultExpand: false
+  defaultExpand: false,
 })
 
 const component = ref<any>(null)
-const sourceCode = ref('')
+const sourceFiles = ref<SourceFile[]>([])
+const activeFile = ref('')
 const showCode = ref(props.defaultExpand)
 const error = ref<string | null>(null)
 const copySuccess = ref(false)
-const highlightedCode = ref('')
+const highlightedCodeMap = ref<Record<string, string>>({})
 
-// 使用 import.meta.glob 预先加载所有 demo 组件和源码
-// 使用 eager: true 立即加载，创建映射关系
 const demoModules = import.meta.glob('../../../demo/examples/*.vue', { eager: true })
 const demoRawModules = import.meta.glob('../../../demo/examples/*.vue', {
   query: '?raw',
   import: 'default',
-  eager: true
+  eager: true,
+})
+const componentRawModules = import.meta.glob('../../../src/**/*.vue', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
 })
 
-// 创建路径映射：标准化路径 -> 组件/源码
 const componentMap = new Map<string, any>()
 const sourceCodeMap = new Map<string, string>()
 
-// 初始化映射关系
-Object.keys(demoModules).forEach(key => {
-  const fileName = key.split('/').pop() || ''
-  
-  // 只支持 demo/examples/BaseDemo.vue 格式
-  const path = `demo/examples/${fileName}`
-  
-  const module = demoModules[key] as any
-  const componentValue = module.default || module
-  
-  componentMap.set(path, componentValue)
-  
-  console.log(`已注册组件映射: ${path}`)
-})
+function registerModule(key: string, module: unknown, isRaw: boolean) {
+  const normalizedKey = key.replace(/\\/g, '/')
+  let path: string | null = null
 
-// 初始化源码映射关系
-Object.keys(demoRawModules).forEach(key => {
-  const fileName = key.split('/').pop() || ''
-  
-  // 只支持 demo/examples/BaseDemo.vue 格式
-  const path = `demo/examples/${fileName}`
-  
-  const rawContent = demoRawModules[key] as string
-  
-  sourceCodeMap.set(path, rawContent)
-  
-  console.log(`已注册源码映射: ${path}`)
-})
+  if (normalizedKey.includes('/demo/examples/')) {
+    const fileName = normalizedKey.split('/').pop() || ''
+    path = `demo/examples/${fileName}`
+  } else if (normalizedKey.includes('/src/')) {
+    path = `src/${normalizedKey.split('/src/')[1]}`
+  }
 
-console.log('组件映射总数:', componentMap.size)
-console.log('源码映射总数:', sourceCodeMap.size)
+  if (!path) return
 
-// 标准化路径（用于查找）：只支持 demo/examples/BaseDemo.vue 格式
-function normalizePath(src: string): string {
-  // 移除开头的 /（如果有）
-  const path = src.startsWith('/') ? src.slice(1) : src
-  
-  return path
+  if (isRaw) {
+    sourceCodeMap.set(path, module as string)
+  } else {
+    const mod = module as { default?: unknown }
+    componentMap.set(path, mod.default || module)
+  }
 }
 
-// 加载组件
+Object.entries(demoModules).forEach(([key, mod]) => registerModule(key, mod, false))
+Object.entries(demoRawModules).forEach(([key, mod]) => registerModule(key, mod, true))
+Object.entries(componentRawModules).forEach(([key, mod]) => registerModule(key, mod, true))
+
+function normalizePath(src: string): string {
+  return src.startsWith('/') ? src.slice(1) : src
+}
+
+function resolveImportPath(specifier: string, fromPath: string): string | null {
+  if (!specifier.endsWith('.vue')) return null
+  if (specifier.startsWith('@/')) return `src/${specifier.slice(2)}`
+  if (!specifier.startsWith('.')) return null
+
+  const baseDir = fromPath.split('/').slice(0, -1)
+  const segments = specifier.split('/')
+  const resolved = [...baseDir]
+
+  for (const segment of segments) {
+    if (segment === '.' || segment === '') continue
+    if (segment === '..') resolved.pop()
+    else resolved.push(segment)
+  }
+
+  return resolved.join('/')
+}
+
+function parseLocalVueImports(source: string, fromPath: string): string[] {
+  const imports: string[] = []
+  const importRegex = /import\s+(?:type\s+)?(?:[\w\s{},*]+\s+from\s+)?['"]([^'"]+)['"]/g
+  let match: RegExpExecArray | null
+
+  while ((match = importRegex.exec(source)) !== null) {
+    const resolved = resolveImportPath(match[1], fromPath)
+    if (resolved && sourceCodeMap.has(resolved)) imports.push(resolved)
+  }
+
+  return imports
+}
+
+function fileLabel(path: string): string {
+  return path.split('/').pop() || ''
+}
+
+function buildSourceFileList(mainPath: string): SourceFile[] {
+  const mainContent = sourceCodeMap.get(mainPath) || ''
+  const extraPaths = props.files
+    ? props.files.split(',').map(item => normalizePath(item.trim())).filter(Boolean)
+    : parseLocalVueImports(mainContent, mainPath)
+
+  const paths = [mainPath, ...extraPaths.filter(path => path !== mainPath)]
+  const uniquePaths = [...new Set(paths)].filter(path => sourceCodeMap.has(path))
+
+  return uniquePaths.map(path => ({
+    path,
+    label: fileLabel(path),
+    content: sourceCodeMap.get(path) || '',
+  }))
+}
+
+const activeSourceFile = computed(() =>
+  sourceFiles.value.find(file => file.path === activeFile.value) ?? sourceFiles.value[0] ?? null,
+)
+
+const activeHighlightedCode = computed(() => {
+  const path = activeSourceFile.value?.path
+  return path ? highlightedCodeMap.value[path] ?? '' : ''
+})
+
 function loadComponent() {
   try {
     error.value = null
-    
     const normalizedPath = normalizePath(props.src)
-    console.log('查找组件，原始路径:', props.src)
-    console.log('标准化路径:', normalizedPath)
-    
-    // 从映射中查找
+
     if (componentMap.has(normalizedPath)) {
       component.value = componentMap.get(normalizedPath)
-      console.log('组件加载成功')
     } else {
-      throw new Error(`未找到组件: ${props.src}。标准化路径: ${normalizedPath}。可用的路径: ${Array.from(componentMap.keys()).join(', ')}`)
+      throw new Error(
+        `未找到组件: ${props.src}。可用的路径: ${Array.from(componentMap.keys()).join(', ')}`,
+      )
     }
-  } catch (err: any) {
-    console.error('组件加载失败:', err)
-    error.value = err.message || '未知错误'
+  } catch (err: unknown) {
+    error.value = err instanceof Error ? err.message : '未知错误'
   }
 }
 
-// 加载源码
-function loadSourceCode() {
+function loadSourceFiles() {
+  const normalizedPath = normalizePath(props.src)
+  sourceFiles.value = buildSourceFileList(normalizedPath)
+  activeFile.value = normalizedPath
+}
+
+async function highlightFile(file: SourceFile) {
+  if (highlightedCodeMap.value[file.path]) return
+
   try {
-    const normalizedPath = normalizePath(props.src)
-    console.log('查找源码，原始路径:', props.src)
-    console.log('标准化路径:', normalizedPath)
-    
-    // 从映射中查找
-    if (sourceCodeMap.has(normalizedPath)) {
-      sourceCode.value = sourceCodeMap.get(normalizedPath) || ''
-      console.log('源码加载成功，长度:', sourceCode.value.length)
-    } else {
-      console.warn(`未找到源码: ${props.src}。标准化路径: ${normalizedPath}。可用的路径: ${Array.from(sourceCodeMap.keys()).join(', ')}`)
+    const html = await codeToHtml(file.content, {
+      lang: 'vue',
+      theme: {
+        type: 'light',
+        colors: {
+          'editor.background': '#f8fafc',
+          'editor.foreground': '#334155',
+        },
+        tokenColors: [
+          {
+            scope: ['keyword', 'operator'],
+            settings: { foreground: '#dc2626' },
+          },
+        ],
+      },
+    })
+    highlightedCodeMap.value = { ...highlightedCodeMap.value, [file.path]: html }
+  } catch {
+    highlightedCodeMap.value = {
+      ...highlightedCodeMap.value,
+      [file.path]: `<pre><code>${file.content}</code></pre>`,
     }
-  } catch (err) {
-    console.error('无法获取源码:', err)
   }
 }
 
-// 使用 Shiki 高亮代码
-async function highlightCode() {
-  if (!sourceCode.value) return
-  
-  try {
-const html = await codeToHtml(sourceCode.value, {
-  lang: 'vue',
-  theme: {
-    type: 'light',
-    colors: {
-      'editor.background': '#f8fafc', // 背景色
-      'editor.foreground': '#334155', // 文字颜色
-    },
-    tokenColors: [
-      {
-        scope: ['keyword', 'operator'],
-        settings: {
-          foreground: '#dc2626'
-        }
-      }
-    ]
+async function highlightAllFiles() {
+  await Promise.all(sourceFiles.value.map(file => highlightFile(file)))
+}
+
+watch([showCode, sourceFiles], () => {
+  if (showCode.value && sourceFiles.value.length) {
+    void highlightAllFiles()
   }
 })
-    highlightedCode.value = html
-  } catch (err) {
-    console.error('代码高亮失败:', err)
-    // 降级方案：显示纯文本
-    highlightedCode.value = `<pre><code>${sourceCode.value}</code></pre>`
-  }
-}
 
-// 监听代码变化
-watch([showCode, sourceCode], () => {
-  if (showCode.value && sourceCode.value) {
-    highlightCode()
-  }
+watch(activeFile, () => {
+  const file = activeSourceFile.value
+  if (showCode.value && file) void highlightFile(file)
 })
 
 onMounted(() => {
   loadComponent()
-  loadSourceCode()
-  
-  if (showCode.value && sourceCode.value) {
-    highlightCode()
+  loadSourceFiles()
+  if (showCode.value && sourceFiles.value.length) {
+    void highlightAllFiles()
   }
 })
 
-// 切换代码显示
 function toggleCode() {
   showCode.value = !showCode.value
-  if (showCode.value && sourceCode.value) {
-    highlightCode()
+  if (showCode.value && sourceFiles.value.length) {
+    void highlightAllFiles()
   }
 }
 
-// 复制代码
 async function copyCode() {
-  if (!sourceCode.value) {
-    return
-  }
-  
+  const content = activeSourceFile.value?.content
+  if (!content) return
+
   try {
-    await navigator.clipboard.writeText(sourceCode.value)
+    await navigator.clipboard.writeText(content)
     copySuccess.value = true
     setTimeout(() => {
       copySuccess.value = false
     }, 2000)
-  } catch (err) {
-    console.error('复制失败:', err)
+  } catch {
     alert('复制失败，请手动复制')
   }
-}
-
-// 在新标签页打开 demo
-function openInNewTab() {
-  // 从 src 中提取文件名，例如 demo/examples/BaseDemo.vue -> BaseDemo
-  const fileName = props.src.split('/').pop()?.replace('.vue', '') || ''
-  // 构建 demo 页面 URL
-  const demoUrl = `/demo/?demo=${fileName}`
-  window.open(demoUrl, '_blank')
 }
 </script>
 
@@ -282,7 +318,6 @@ function openInNewTab() {
   transition: all 0.2s;
 }
 
-/* 图标按钮样式 */
 .toolbar-btn:hover {
   color: #0969da;
 }
@@ -300,13 +335,23 @@ function openInNewTab() {
   overflow: hidden;
 }
 
+.demo-code-tabs :deep(.el-tabs__header) {
+  margin: 0;
+  padding: 0 12px;
+  background: #f6f8fa;
+  border-bottom: 1px solid #e1e4e8;
+}
+
+.demo-code-tabs :deep(.el-tabs__nav-wrap::after) {
+  display: none;
+}
+
 .demo-code {
   overflow-x: auto;
   max-height: 600px;
   overflow-y: auto;
 }
 
-/* Shiki 生成的代码样式调整 */
 .demo-code :deep(pre) {
   margin: 0;
   padding: 20px;
@@ -320,7 +365,6 @@ function openInNewTab() {
   line-height: 1.7;
 }
 
-/* 行悬停效果 */
 .demo-code :deep(.line:hover) {
   background: rgba(255, 255, 255, 0.05);
 }
